@@ -1,0 +1,30 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.002.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "csharp", "csharp", "{743FDAEC-6970-41A1-BCA6-7237D0FCC806}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CSharpAnalyzer", "csharp\CSharpAnalyzer\CSharpAnalyzer.csproj", "{CB24256F-F26F-4A4E-8E79-B48094DD0AD1}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CB24256F-F26F-4A4E-8E79-B48094DD0AD1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CB24256F-F26F-4A4E-8E79-B48094DD0AD1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CB24256F-F26F-4A4E-8E79-B48094DD0AD1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CB24256F-F26F-4A4E-8E79-B48094DD0AD1}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{CB24256F-F26F-4A4E-8E79-B48094DD0AD1} = {743FDAEC-6970-41A1-BCA6-7237D0FCC806}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {AD9C2DFF-4902-467B-BFC7-21CF6F3C9CCA}
+	EndGlobalSection
+EndGlobal

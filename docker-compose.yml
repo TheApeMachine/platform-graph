@@ -1,0 +1,104 @@
+services:
+  schema-extract:
+    build: ./mongodb
+    env_file:
+      - .env
+  
+  fanapp-extract:
+    build: ./csharp
+    env_file:
+      - .env
+    environment:
+      - ROOT_NAME=FanApp
+      - BASE_URL=https://github.com/fanfactory/FanApp/blob/NewStaging
+    volumes:
+      - /home/theapemachine/go/src/github.com/fanfactory/FanApp:/app
+
+  fanadapter-extract:
+    build: ./csharp
+    env_file:
+      - .env
+    environment:
+      - ROOT_NAME=FanAdapter
+      - BASE_URL=https://github.com/fanfactory/fanadapter/blob/NewStaging
+    volumes:
+      - /home/theapemachine/go/src/github.com/fanfactory/fanadapter:/app
+
+  gateway-extract:
+    build: ./go
+    env_file:
+      - .env
+    environment:
+      - ROOT_NAME=gateway-service
+      - BASE_URL=https://github.com/fanfactory/gateway/blob/master
+    volumes:
+      - /home/theapemachine/go/src/github.com/fanfactory/gateway:/app
+
+  data-extract:
+    build: ./go
+    env_file:
+      - .env
+    environment:
+      - ROOT_NAME=data-service
+      - BASE_URL=https://github.com/fanfactory/data/blob/master
+    volumes:
+      - /home/theapemachine/go/src/github.com/fanfactory/data:/app
+
+  integration-extract:
+    build: ./go
+    env_file:
+      - .env
+    environment:
+      - ROOT_NAME=integration-service
+      - BASE_URL=https://github.com/fanfactory/integration/blob/master
+    volumes:
+      - /home/theapemachine/go/src/github.com/fanfactory/integration:/app
+
+  cms-extract:
+    build: ./php
+    env_file:
+      - .env
+    environment:
+      - ROOT_NAME=cms
+      - BASE_URL=https://github.com/fanfactory/fan-academy-cms/blob/master
+    volumes:
+      - /home/theapemachine/go/src/github.com/fanfactory/fan-academy-cms:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  fancheck-extract:
+    build: ./js
+    env_file:
+      - .env
+    environment:
+      - ROOT_NAME=fancheck
+      - BASE_URL=https://github.com/fanfactory/fancheck/blob/master
+    volumes:
+      - /home/theapemachine/go/src/github.com/fanfactory/fancheck:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # neo4j service remains commented out
+  # neo4j:
+  #   image: neo4j:enterprise
+  #   ports:
+  #     - "7474:7474"
+  #     - "7687:7687"
+  #   environment:
+  #     - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+  #     - NEO4J_AUTH=neo4j/securepassword
+  #     - NEO4J_apoc_export_file_enabled=true
+  #     - NEO4J_apoc_import_file_enabled=true
+  #     - NEO4J_apoc_import_file_use__neo4j__config=true
+  #     - NEO4J_PLUGINS=["apoc", "graph-data-science", "apoc-extended", "bloom"]
+  #   volumes:
+  #     - neo4j_data:/data
+  #     - neo4j_logs:/logs
+  #     - /Users/theapemachine/data:/var/lib/neo4j/import
+  #     - neo4j_plugins:/plugins
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:

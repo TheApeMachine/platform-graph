@@ -1,0 +1,7 @@
+.env
+.vscode/
+csharp/CSharpAnalyzer/bin/
+csharp/CSharpAnalyzer/obj/
+go/main
+js/node_modules/
+php/vendor/
