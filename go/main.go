@@ -270,52 +270,91 @@ func processGenDecl(ctx context.Context, x *ast.GenDecl, packageId, filePath str
 }
 
 // Process function and method declarations
+// Process function and method declarations with call path analysis
 func processFuncDecl(ctx context.Context, x *ast.FuncDecl, packageId, filePath string, fset *token.FileSet, rootName string, session neo4j.SessionWithContext) {
-	funcName := x.Name.Name
-	funcSignature := funcName // Extend with parameters if needed
-	var funcId string
+    funcName := x.Name.Name
+    funcSignature := funcName // Extend with parameters if needed
+    var funcId string
 
-	if x.Recv != nil && len(x.Recv.List) > 0 {
-		recvType := extractReceiverType(x.Recv)
-		if recvType != "" {
-			structId := fmt.Sprintf("%s.%s", packageId, recvType)
-			funcId = fmt.Sprintf("%s.%s", structId, funcSignature)
+    if x.Recv != nil && len(x.Recv.List) > 0 {
+        recvType := extractReceiverType(x.Recv)
+        if recvType != "" {
+            structId := fmt.Sprintf("%s.%s", packageId, recvType)
+            funcId = fmt.Sprintf("%s.%s", structId, funcSignature)
 
-			// Create or merge Method node
-			_, err := session.Run(ctx,
-				"MERGE (m:Method {id: $id}) "+
-					"ON CREATE SET m.name = $name, m.structId = $structId, m.project = $project, m.color = $color, m.url = $url",
-				map[string]interface{}{
-					"id":       funcId,
-					"name":     funcName,
-					"structId": structId,
-					"project":  rootName,
-					"color":    NodeColors["Method"],
-					"url":      createUrl("/app", filePath, "/app", fset.Position(x.Pos()).Line),
-				})
-			if err != nil {
-				log.Printf("Failed to create method node: %v", err)
-			}
-		}
-	} else {
-		funcId = fmt.Sprintf("%s.%s", packageId, funcSignature)
+            // Create or merge Method node
+            _, err := session.Run(ctx,
+                "MERGE (m:Method {id: $id}) "+
+                    "ON CREATE SET m.name = $name, m.structId = $structId, m.project = $project, m.color = $color, m.url = $url",
+                map[string]interface{}{
+                    "id":       funcId,
+                    "name":     funcName,
+                    "structId": structId,
+                    "project":  rootName,
+                    "color":    NodeColors["Method"],
+                    "url":      createUrl("/app", filePath, "/app", fset.Position(x.Pos()).Line),
+                })
+            if err != nil {
+                log.Printf("Failed to create method node: %v", err)
+            }
+        }
+    } else {
+        funcId = fmt.Sprintf("%s.%s", packageId, funcSignature)
 
-		// Create or merge Function node
-		_, err := session.Run(ctx,
-			"MERGE (f:Function {id: $id}) "+
-				"ON CREATE SET f.name = $name, f.packageId = $packageId, f.project = $project, f.color = $color, f.url = $url",
-			map[string]interface{}{
-				"id":        funcId,
-				"name":      funcName,
-				"packageId": packageId,
-				"project":   rootName,
-				"color":     NodeColors["Function"],
-				"url":       createUrl("/app", filePath, "/app", fset.Position(x.Pos()).Line),
-			})
-		if err != nil {
-			log.Printf("Failed to create function node: %v", err)
-		}
-	}
+        // Create or merge Function node
+        _, err := session.Run(ctx,
+            "MERGE (f:Function {id: $id}) "+
+                "ON CREATE SET f.name = $name, f.packageId = $packageId, f.project = $project, f.color = $color, f.url = $url",
+            map[string]interface{}{
+                "id":        funcId,
+                "name":      funcName,
+                "packageId": packageId,
+                "project":   rootName,
+                "color":     NodeColors["Function"],
+                "url":       createUrl("/app", filePath, "/app", fset.Position(x.Pos()).Line),
+            })
+        if err != nil {
+            log.Printf("Failed to create function node: %v", err)
+        }
+    }
+
+    // Traverse the function body to find called methods
+    ast.Inspect(x.Body, func(n ast.Node) bool {
+        if callExpr, ok := n.(*ast.CallExpr); ok {
+            if ident, ok := callExpr.Fun.(*ast.Ident); ok {
+                calledFuncName := ident.Name
+                calledFuncId := fmt.Sprintf("%s.%s", packageId, calledFuncName)
+
+                // Create or merge called function/method node to ensure it exists
+                _, err := session.Run(ctx,
+                    "MERGE (callee:Function {id: $calleeId}) "+
+                        "ON CREATE SET callee.name = $calleeName, callee.packageId = $packageId, callee.project = $project, callee.color = $color",
+                    map[string]interface{}{
+                        "calleeId":   calledFuncId,
+                        "calleeName": calledFuncName,
+                        "packageId":  packageId,
+                        "project":    rootName,
+                        "color":      NodeColors["Function"], // Assuming function nodes are green
+                    })
+                if err != nil {
+                    log.Printf("Failed to create callee node: %v", err)
+                }
+
+                // Create relationship in Neo4j
+                _, err = session.Run(ctx,
+                    "MATCH (caller {id: $callerId}), (callee {id: $calleeId}) "+
+                        "MERGE (caller)-[:CALLS]->(callee)",
+                    map[string]interface{}{
+                        "callerId": funcId,
+                        "calleeId": calledFuncId,
+                    })
+                if err != nil {
+                    log.Printf("Failed to create CALLS relationship: %v", err)
+                }
+            }
+        }
+        return true
+    })
 }
 
 // Helper function to extract receiver type from a method declaration

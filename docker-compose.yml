@@ -12,7 +12,7 @@ services:
       - ROOT_NAME=FanApp
       - BASE_URL=https://github.com/fanfactory/FanApp/blob/NewStaging
     volumes:
-      - /home/theapemachine/go/src/github.com/fanfactory/FanApp:/app
+      - /Users/theapemachine/go/src/github.com/fanfactory/FanApp:/app
 
   fanadapter-extract:
     build: ./csharp
@@ -22,7 +22,7 @@ services:
       - ROOT_NAME=FanAdapter
       - BASE_URL=https://github.com/fanfactory/fanadapter/blob/NewStaging
     volumes:
-      - /home/theapemachine/go/src/github.com/fanfactory/fanadapter:/app
+      - /Users/theapemachine/go/src/github.com/fanfactory/fanadapter:/app
 
   gateway-extract:
     build: ./go
@@ -32,7 +32,7 @@ services:
       - ROOT_NAME=gateway-service
       - BASE_URL=https://github.com/fanfactory/gateway/blob/master
     volumes:
-      - /home/theapemachine/go/src/github.com/fanfactory/gateway:/app
+      - /Users/theapemachine/go/src/github.com/fanfactory/gateway:/app
 
   data-extract:
     build: ./go
@@ -42,7 +42,7 @@ services:
       - ROOT_NAME=data-service
       - BASE_URL=https://github.com/fanfactory/data/blob/master
     volumes:
-      - /home/theapemachine/go/src/github.com/fanfactory/data:/app
+      - /Users/theapemachine/go/src/github.com/fanfactory/data:/app
 
   integration-extract:
     build: ./go
@@ -52,7 +52,7 @@ services:
       - ROOT_NAME=integration-service
       - BASE_URL=https://github.com/fanfactory/integration/blob/master
     volumes:
-      - /home/theapemachine/go/src/github.com/fanfactory/integration:/app
+      - /Users/theapemachine/go/src/github.com/fanfactory/integration:/app
 
   cms-extract:
     build: ./php
@@ -62,7 +62,7 @@ services:
       - ROOT_NAME=cms
       - BASE_URL=https://github.com/fanfactory/fan-academy-cms/blob/master
     volumes:
-      - /home/theapemachine/go/src/github.com/fanfactory/fan-academy-cms:/app
+      - /Users/theapemachine/go/src/github.com/fanfactory/fan-academy-cms:/app
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -74,7 +74,7 @@ services:
       - ROOT_NAME=fancheck
       - BASE_URL=https://github.com/fanfactory/fancheck/blob/master
     volumes:
-      - /home/theapemachine/go/src/github.com/fanfactory/fancheck:/app
+      - /Users/theapemachine/go/src/github.com/fanfactory/fancheck:/app
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
