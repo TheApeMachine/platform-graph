@@ -1,14 +1,17 @@
-# Use an official Golang image as a parent image
-FROM golang:1.23 AS builder
+# Base stage
+FROM golang:1.21
 
-# Set the working directory inside the container
+RUN apt-get update && apt-get install -y libstdc++6 libgcc1 && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /analyzer
+COPY go.mod go.sum main.go ./
+COPY graphlang ./graphlang
+RUN go mod download \
+    && go get -u github.com/smacker/go-tree-sitter \
+    && go get -u github.com/neo4j/neo4j-go-driver/v5/neo4j
 
-# {{ edit_1 }}
-# Remove hard-coded environment variables
-# ENV NEO4J_URI=bolt://host.docker.internal:7687
-# ENV NEO4J_USER=neo4j
-# ENV NEO4J_PASSWORD=securepassword
-# {{ edit_1 }}
+RUN go build main.go
 
-# ... existing COPY and RUN commands ...
+ENV PATH="/root/go/bin:${PATH}"
+
+ENTRYPOINT ["/analyzer/main"]

@@ -5,76 +5,76 @@ services:
       - .env
   
   fanapp-extract:
-    build: ./csharp
+    build: .
     env_file:
       - .env
     environment:
       - ROOT_NAME=FanApp
       - BASE_URL=https://github.com/fanfactory/FanApp/blob/NewStaging
     volumes:
-      - /Users/theapemachine/go/src/github.com/fanfactory/FanApp:/app
+      - /home/theapemachine/go/src/github.com/fanfactory/FanApp:/app
 
   fanadapter-extract:
-    build: ./csharp
+    build: .
     env_file:
       - .env
     environment:
       - ROOT_NAME=FanAdapter
       - BASE_URL=https://github.com/fanfactory/fanadapter/blob/NewStaging
     volumes:
-      - /Users/theapemachine/go/src/github.com/fanfactory/fanadapter:/app
+      - /home/theapemachine/go/src/github.com/fanfactory/fanadapter:/app
 
   gateway-extract:
-    build: ./go
+    build: .
     env_file:
       - .env
     environment:
       - ROOT_NAME=gateway-service
       - BASE_URL=https://github.com/fanfactory/gateway/blob/master
     volumes:
-      - /Users/theapemachine/go/src/github.com/fanfactory/gateway:/app
+      - /home/theapemachine/go/src/github.com/fanfactory/gateway:/app
 
   data-extract:
-    build: ./go
+    build: .
     env_file:
       - .env
     environment:
       - ROOT_NAME=data-service
       - BASE_URL=https://github.com/fanfactory/data/blob/master
     volumes:
-      - /Users/theapemachine/go/src/github.com/fanfactory/data:/app
+      - /home/theapemachine/go/src/github.com/fanfactory/data:/app
 
   integration-extract:
-    build: ./go
+    build: .
     env_file:
       - .env
     environment:
       - ROOT_NAME=integration-service
       - BASE_URL=https://github.com/fanfactory/integration/blob/master
     volumes:
-      - /Users/theapemachine/go/src/github.com/fanfactory/integration:/app
+      - /home/theapemachine/go/src/github.com/fanfactory/integration:/app
 
   cms-extract:
-    build: ./php
+    build: .
     env_file:
       - .env
     environment:
       - ROOT_NAME=cms
       - BASE_URL=https://github.com/fanfactory/fan-academy-cms/blob/master
     volumes:
-      - /Users/theapemachine/go/src/github.com/fanfactory/fan-academy-cms:/app
+      - /home/theapemachine/go/src/github.com/fanfactory/fan-academy-cms:/app
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   fancheck-extract:
-    build: ./js
+    build: .
     env_file:
       - .env
     environment:
       - ROOT_NAME=fancheck
       - BASE_URL=https://github.com/fanfactory/fancheck/blob/master
     volumes:
-      - /Users/theapemachine/go/src/github.com/fanfactory/fancheck:/app
+      - /home/theapemachine/go/src/github.com/fanfactory/fancheck:/app
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -94,7 +94,7 @@ services:
   #   volumes:
   #     - neo4j_data:/data
   #     - neo4j_logs:/logs
-  #     - /Users/theapemachine/data:/var/lib/neo4j/import
+  #     - /home/theapemachine/data:/var/lib/neo4j/import
   #     - neo4j_plugins:/plugins
 
 volumes:

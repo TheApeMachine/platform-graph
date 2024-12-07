@@ -20,22 +20,23 @@ namespace CodeAnalyzer
         static readonly Dictionary<string, string> NodeColors = new()
         {
             { "Class", "#4287f5" },
+            { "Interface", "#f542f5" },
             { "Method", "#42f54e" },
             { "HttpCall", "#f54242" },
             { "MongoCollection", "#f5a442" },
-            { "Interface", "#f542f5" },
-            { "ExternalService", "#f5f542" }
+            { "ExternalService", "#f5f542" },
+            { "Root", "orange" }
         };
 
         // Queue to handle pending MongoDB links
         private static ConcurrentQueue<(string MethodId, string CollectionId)> pendingMongoLinks = new();
 
-        // **Added:** Class-level variable for baseUrl
+        // Class-level variable for baseUrl
         private static string BaseUrl;
 
         static async Task Main(string[] args)
         {
-            // **Modified:** Initialize BaseUrl at class level
+            // Initialize BaseUrl at class level
             BaseUrl = Environment.GetEnvironmentVariable("BASE_URL") ?? "http://localhost";
             string rootName = Environment.GetEnvironmentVariable("ROOT_NAME") ?? "UnknownRoot";
             string solutionPath = @"/app/" + rootName + ".sln";
@@ -51,9 +52,13 @@ namespace CodeAnalyzer
             await CreateUniquenessConstraints(session);
 
             // Create root node
-            await session.RunAsync(
-                "MERGE (r:Root {name: $name, project: $project, color: $color})",
-                new { name = rootName, project = rootName, color = "orange" });
+            string rootId = $"root:{rootName}";
+            await CreateNode(session, rootId, "Root", new Dictionary<string, object>
+            {
+                { "name", rootName },
+                { "project", rootName },
+                { "color", NodeColors["Root"] }
+            });
 
             // Register MSBuild
             MSBuildLocator.RegisterDefaults();
@@ -65,7 +70,7 @@ namespace CodeAnalyzer
             // Process each project in the solution
             foreach (var project in solution.Projects)
             {
-                await ProcessProject(project, session);
+                await ProcessProject(project, session, rootId);
             }
 
             // Process pending MongoDB links
@@ -74,75 +79,99 @@ namespace CodeAnalyzer
             await session.CloseAsync();
         }
 
-        static async Task ProcessProject(Project project, IAsyncSession session)
+        static async Task ProcessProject(Project project, IAsyncSession session, string rootId)
         {
             string projectName = project.Name;
 
             foreach (var document in project.Documents)
             {
                 var syntaxTree = await document.GetSyntaxTreeAsync();
-                if (syntaxTree == null) continue; // Null check for syntax tree
+                if (syntaxTree == null) continue;
 
-                var semanticModel = await document.GetSemanticModelAsync(); // Cache semantic model
+                var semanticModel = await document.GetSemanticModelAsync();
+                if (semanticModel == null) continue;
+
                 var root = await syntaxTree.GetRootAsync();
 
-                var classDeclarations = root.DescendantNodes().OfType<ClassDeclarationSyntax>();
-                foreach (var classDeclaration in classDeclarations)
+                var classDeclarations = root.DescendantNodes().OfType<TypeDeclarationSyntax>()
+                    .Where(td => td is ClassDeclarationSyntax || td is InterfaceDeclarationSyntax);
+
+                foreach (var typeDeclaration in classDeclarations)
                 {
-                    await ProcessClass(classDeclaration, semanticModel, session, projectName, document);
+                    await ProcessType(typeDeclaration, semanticModel, session, projectName, document, rootId);
                 }
             }
         }
 
-        static async Task ProcessClass(ClassDeclarationSyntax classDeclaration, SemanticModel semanticModel, IAsyncSession session, string projectName, Document document)
+        static async Task ProcessType(TypeDeclarationSyntax typeDeclaration, SemanticModel semanticModel, IAsyncSession session, string projectName, Document document, string rootId)
         {
-            string className = classDeclaration.Identifier.Text;
-            string namespaceName = GetFullNamespace(classDeclaration);
-            string classId = $"{projectName}:{namespaceName}.{className}";
+            string typeName = typeDeclaration.Identifier.Text;
+            string namespaceName = GetFullNamespace(typeDeclaration);
 
-            // Create or merge Class node
-            await CreateNode(session, classId, "Class", new Dictionary<string, object>
+            // Determine if this is an interface or class
+            var symbol = semanticModel.GetDeclaredSymbol(typeDeclaration) as ITypeSymbol;
+            bool isInterface = symbol?.TypeKind == TypeKind.Interface;
+
+            string label = isInterface ? "Interface" : "Class";
+            string typeId = $"{projectName}:{namespaceName}.{typeName}";
+
+            // Create or merge Class/Interface node
+            await CreateNode(session, typeId, label, new Dictionary<string, object>
             {
-                { "name", className },
+                { "name", typeName },
                 { "namespace", namespaceName },
                 { "project", projectName },
                 { "file", document.FilePath },
-                { "color", NodeColors["Class"] },
-                { "url", CreateUrl(document.FilePath, classDeclaration.GetLocation().GetLineSpan().StartLinePosition.Line + 1) }
+                { "color", NodeColors[label] },
+                { "url", CreateUrl(document.FilePath, typeDeclaration.GetLocation().GetLineSpan().StartLinePosition.Line + 1) }
             });
 
+            // Link Root to this class/interface
+            await CreateRelationship(session, rootId, typeId, "CONTAINS");
+
             // Process base classes and interfaces
-            if (classDeclaration.BaseList != null)
+            if (typeDeclaration.BaseList != null)
             {
-                foreach (var baseType in classDeclaration.BaseList.Types)
+                foreach (var baseType in typeDeclaration.BaseList.Types)
                 {
-                    await ProcessBaseType(baseType, session, projectName, namespaceName, classId);
+                    await ProcessBaseType(baseType, session, projectName, typeId, semanticModel);
                 }
             }
 
             // Process method declarations
-            var methodDeclarations = classDeclaration.DescendantNodes().OfType<MethodDeclarationSyntax>();
+            var methodDeclarations = typeDeclaration.DescendantNodes().OfType<MethodDeclarationSyntax>();
             foreach (var method in methodDeclarations)
             {
-                await ProcessMethod(method, semanticModel, session, projectName, document, classId);
+                await ProcessMethod(method, semanticModel, session, projectName, document, typeId);
             }
         }
 
-        static async Task ProcessBaseType(BaseTypeSyntax baseType, IAsyncSession session, string projectName, string namespaceName, string classId)
+        static async Task ProcessBaseType(BaseTypeSyntax baseType, IAsyncSession session, string projectName, string derivedId, SemanticModel semanticModel)
         {
-            string baseTypeName = baseType.Type.ToString();
-            string baseTypeId = $"{projectName}:{namespaceName}.{baseTypeName}";
+            var typeSymbol = semanticModel.GetSymbolInfo(baseType.Type).Symbol as ITypeSymbol;
+            if (typeSymbol == null) return;
 
-            // Assuming base types can be classes or interfaces
-            await CreateNode(session, baseTypeId, "Class", new Dictionary<string, object>
+            string baseTypeName = typeSymbol.Name;
+            string baseNamespaceName = typeSymbol.ContainingNamespace.ToDisplayString();
+            string baseProjectName = typeSymbol.ContainingAssembly?.Name ?? projectName; // Might be external
+            string baseTypeId = $"{baseProjectName}:{baseNamespaceName}.{baseTypeName}";
+
+            // Determine if base type is a class or interface
+            bool isInterface = typeSymbol.TypeKind == TypeKind.Interface;
+            string label = isInterface ? "Interface" : "Class";
+
+            // Create or merge base node
+            await CreateNode(session, baseTypeId, label, new Dictionary<string, object>
             {
                 { "name", baseTypeName },
-                { "project", projectName },
-                { "color", NodeColors["Class"] }
+                { "namespace", baseNamespaceName },
+                { "project", baseProjectName },
+                { "color", NodeColors[label] }
             });
 
-            // Create INHERITS_FROM relationship
-            await CreateRelationship(session, classId, baseTypeId, "INHERITS_FROM");
+            // Create relationship depending on interface or class
+            string relationship = isInterface ? "IMPLEMENTS" : "INHERITS_FROM";
+            await CreateRelationship(session, derivedId, baseTypeId, relationship);
         }
 
         static async Task ProcessMethod(MethodDeclarationSyntax method, SemanticModel semanticModel, IAsyncSession session, string projectName, Document document, string classId)
@@ -166,32 +195,30 @@ namespace CodeAnalyzer
             // Link Class to Method
             await CreateRelationship(session, classId, methodId, "DECLARES");
 
-            // Process method body if not null
-            if (method.Body != null)
+            // Process method body or expression body
+            var body = (SyntaxNode)method.Body ?? method.ExpressionBody;
+            if (body != null)
             {
                 // Process method invocations
-                var methodInvocations = method.Body.DescendantNodes().OfType<InvocationExpressionSyntax>();
+                var methodInvocations = body.DescendantNodes().OfType<InvocationExpressionSyntax>();
                 foreach (var invocation in methodInvocations)
                 {
                     var resolvedMethod = ResolveMethod(invocation, semanticModel);
                     if (resolvedMethod != null && IsUsefulLink("Method", "Method", "CALLS"))
                     {
+                        // Create or merge the target method node if minimal info is available
                         await CreateNode(session, resolvedMethod.Value.MethodId, "Method", new Dictionary<string, object>
                         {
                             { "name", resolvedMethod.Value.MethodName },
                             { "classId", resolvedMethod.Value.ClassId },
-                            { "project", projectName }
+                            { "project", ExtractProjectFromId(resolvedMethod.Value.ClassId) }
                         });
-
                         await CreateRelationship(session, methodId, resolvedMethod.Value.MethodId, "CALLS");
                     }
                 }
 
                 // Process HTTP calls
-                var httpInvocations = method.Body.DescendantNodes()
-                    .OfType<InvocationExpressionSyntax>()
-                    .Where(invocation => IsHttpCall(semanticModel, invocation));
-
+                var httpInvocations = methodInvocations.Where(invocation => IsHttpCall(semanticModel, invocation));
                 foreach (var httpCall in httpInvocations)
                 {
                     string serviceUrl = ExtractHttpServiceUrl(httpCall, semanticModel);
@@ -207,15 +234,11 @@ namespace CodeAnalyzer
                 }
 
                 // Process MongoDB queries
-                var mongoQueries = method.Body.DescendantNodes()
-                    .OfType<InvocationExpressionSyntax>()
-                    .Where(invocation => IsMongoDbQuery(semanticModel, invocation));
-
+                var mongoQueries = methodInvocations.Where(invocation => IsMongoDbQuery(semanticModel, invocation));
                 foreach (var mongoCall in mongoQueries)
                 {
                     string collectionName = ExtractCollectionName(mongoCall, semanticModel);
                     string collectionId = $"mongo:YourDatabaseName.{collectionName}";
-
                     // Enqueue pending Mongo links to process later
                     pendingMongoLinks.Enqueue((methodId, collectionId));
                 }
@@ -229,7 +252,9 @@ namespace CodeAnalyzer
                 throw new ArgumentException("id cannot be null or empty", nameof(id));
             }
 
-            var query = $"MERGE (n:{label} {{id: $id}}) ON CREATE SET {string.Join(", ", properties.Select(p => $"n.{p.Key} = ${p.Key}"))}";
+            // MERGE with ON CREATE and ON MATCH to handle both creation and update
+            string setClause = string.Join(", ", properties.Select(p => $"n.{p.Key} = ${p.Key}"));
+            var query = $"MERGE (n:{label} {{id: $id}}) ON CREATE SET {setClause} ON MATCH SET {setClause}";
             properties["id"] = id;
             await session.RunAsync(query, properties);
         }
@@ -248,9 +273,11 @@ namespace CodeAnalyzer
         static async Task CreateUniquenessConstraints(IAsyncSession session)
         {
             await session.RunAsync("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Class) REQUIRE c.id IS UNIQUE");
+            await session.RunAsync("CREATE CONSTRAINT IF NOT EXISTS FOR (i:Interface) REQUIRE i.id IS UNIQUE");
             await session.RunAsync("CREATE CONSTRAINT IF NOT EXISTS FOR (m:Method) REQUIRE m.id IS UNIQUE");
             await session.RunAsync("CREATE CONSTRAINT IF NOT EXISTS FOR (col:MongoCollection) REQUIRE col.id IS UNIQUE");
             await session.RunAsync("CREATE CONSTRAINT IF NOT EXISTS FOR (s:ExternalService) REQUIRE s.id IS UNIQUE");
+            await session.RunAsync("CREATE CONSTRAINT IF NOT EXISTS FOR (r:Root) REQUIRE r.id IS UNIQUE");
         }
 
         static string GetFullNamespace(BaseTypeDeclarationSyntax syntax)
@@ -300,9 +327,17 @@ namespace CodeAnalyzer
 
         static async Task CleanupPreviousRunData(IAsyncSession session, string rootName)
         {
+            // Including MongoCollection in the cleanup
             await session.RunAsync(
-                "MATCH (n) WHERE n.project = $project AND (n:Class OR n:Method OR n:Interface OR n:ExternalService) DETACH DELETE n",
+                @"MATCH (n) 
+                  WHERE n.project = $project 
+                  AND (n:Class OR n:Method OR n:Interface OR n:ExternalService OR n:MongoCollection) 
+                  DETACH DELETE n",
                 new { project = rootName });
+
+            // Remove the root node if it exists
+            await session.RunAsync("MATCH (r:Root {project: $project}) DETACH DELETE r", new { project = rootName });
+
             Console.WriteLine("Cleaned up data from previous run");
         }
 
@@ -319,6 +354,7 @@ namespace CodeAnalyzer
                 string className = methodSymbol.ContainingType?.Name ?? "Unknown";
                 string namespaceName = methodSymbol.ContainingType?.ContainingNamespace.ToDisplayString();
                 string projectName = methodSymbol.ContainingAssembly?.Name ?? "UnknownProject";
+
                 string classId = $"{projectName}:{namespaceName}.{className}";
                 string methodSignature = $"{methodName}({string.Join(", ", methodSymbol.Parameters.Select(p => p.Type.Name))})";
                 string methodId = $"{classId}.{methodSignature}";
@@ -334,42 +370,34 @@ namespace CodeAnalyzer
             if (methodSymbol == null) return false;
 
             var containingType = methodSymbol.ContainingType;
-            return containingType != null && (
-                containingType.Name.Contains("HttpClient") ||
-                containingType.AllInterfaces.Any(i => i.Name.Contains("IHttpClient"))
-            );
+            if (containingType == null) return false;
+
+            // Check if it's a System.Net.Http.HttpClient or a type containing HttpClient in its name
+            // More robust: Check namespace and name
+            if (containingType.ToDisplayString().StartsWith("System.Net.Http.HttpClient"))
+                return true;
+
+            return containingType.Name.Contains("HttpClient", StringComparison.OrdinalIgnoreCase);
         }
 
         static string ExtractHttpServiceUrl(InvocationExpressionSyntax httpCall, SemanticModel semanticModel)
         {
-            // Attempt to get the symbol info for the method being called
             var symbolInfo = semanticModel.GetSymbolInfo(httpCall);
             var methodSymbol = symbolInfo.Symbol as IMethodSymbol;
 
-            if (methodSymbol != null)
+            if (methodSymbol != null && methodSymbol.ContainingType.ToDisplayString().StartsWith("System.Net.Http.HttpClient"))
             {
-                // Check if the method is part of HttpClient
-                if (methodSymbol.ContainingType.Name.Contains("HttpClient"))
+                var arguments = httpCall.ArgumentList?.Arguments;
+                if (arguments != null && arguments.Count > 0)
                 {
-                    // Extract the arguments passed to the method
-                    var arguments = httpCall.ArgumentList.Arguments;
-
-                    if (arguments.Count > 0)
+                    var firstArgument = arguments[0].Expression;
+                    if (firstArgument is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression))
                     {
-                        // Get the first argument (usually the URL in methods like GetAsync, PostAsync, etc.)
-                        var firstArgument = arguments[0].Expression;
-
-                        // Check if the argument is a string literal
-                        if (firstArgument is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression))
-                        {
-                            // Return the string value of the literal expression
-                            return literal.Token.ValueText;
-                        }
-                        // Handle cases where the URL is a constant or a variable
-                        else if (semanticModel.GetConstantValue(firstArgument).HasValue)
-                        {
-                            return semanticModel.GetConstantValue(firstArgument).Value?.ToString() ?? "UnknownServiceUrl";
-                        }
+                        return literal.Token.ValueText;
+                    }
+                    else if (semanticModel.GetConstantValue(firstArgument).HasValue)
+                    {
+                        return semanticModel.GetConstantValue(firstArgument).Value?.ToString() ?? "UnknownServiceUrl";
                     }
                 }
             }
@@ -377,56 +405,53 @@ namespace CodeAnalyzer
             return "UnknownServiceUrl";
         }
 
-
         static bool IsMongoDbQuery(SemanticModel semanticModel, InvocationExpressionSyntax invocation)
         {
             var methodSymbol = semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
             if (methodSymbol == null) return false;
 
-            var containingType = methodSymbol.ContainingType;
-            return containingType != null && (
-                containingType.Name.Contains("Mongo") ||
-                containingType.AllInterfaces.Any(i => i.Name.Contains("IMongo"))
-            );
+            // Check if the containing type is from MongoDB.Driver namespace
+            // This is more reliable than just checking the name.
+            var ns = methodSymbol.ContainingType?.ContainingNamespace?.ToDisplayString();
+            if (ns != null && ns.StartsWith("MongoDB.Driver", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         static string ExtractCollectionName(InvocationExpressionSyntax mongoCall, SemanticModel semanticModel)
         {
-            // Get the method symbol of the invocation
-            var symbolInfo = semanticModel.GetSymbolInfo(mongoCall);
-            var methodSymbol = symbolInfo.Symbol as IMethodSymbol;
+            // Attempt to find if this invocation is actually calling GetCollection<T>("collectionName")
+            // If so, extract that collection name. Otherwise, fallback to a generic approach.
 
-            if (methodSymbol != null)
+            var methodSymbol = semanticModel.GetSymbolInfo(mongoCall).Symbol as IMethodSymbol;
+            if (methodSymbol == null) return "UnknownCollection";
+
+            if (methodSymbol.Name.Equals("GetCollection", StringComparison.OrdinalIgnoreCase))
             {
-                // Check if the method belongs to a MongoDB-related type
-                if (methodSymbol.ContainingType.Name.Contains("IMongoCollection"))
+                var arguments = mongoCall.ArgumentList?.Arguments;
+                if (arguments != null && arguments.Count > 0)
                 {
-                    // MongoDB collection-related methods usually chain from GetCollection
-                    // Find the first argument in the method call, which could be the collection name
-                    var arguments = mongoCall.ArgumentList.Arguments;
-
-                    if (arguments.Count > 0)
+                    var firstArgument = arguments[0].Expression;
+                    if (firstArgument is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression))
                     {
-                        // Assume the first argument might be the collection name (could be for `Find`, `InsertOne`, etc.)
-                        var firstArgument = arguments[0].Expression;
-
-                        // Check if it's a string literal
-                        if (firstArgument is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression))
-                        {
-                            return literal.Token.ValueText;
-                        }
-                        // Handle cases where the collection name is a constant or a variable
-                        else if (semanticModel.GetConstantValue(firstArgument).HasValue)
-                        {
-                            return semanticModel.GetConstantValue(firstArgument).Value?.ToString() ?? "UnknownCollection";
-                        }
+                        return literal.Token.ValueText;
+                    }
+                    else if (semanticModel.GetConstantValue(firstArgument).HasValue)
+                    {
+                        return semanticModel.GetConstantValue(firstArgument).Value?.ToString() ?? "UnknownCollection";
                     }
                 }
             }
 
+            // If it's not a GetCollection call, we try a fallback approach.
+            // Many MongoDB operations (Find, InsertOne, etc.) happen on an IMongoCollection<T> instance.
+            // Without deeper data-flow analysis, we can't reliably get the collection name here.
+            // We'll just return "UnknownCollection".
             return "UnknownCollection";
         }
-
 
         static async Task ProcessPendingMongoLinks(IAsyncSession session)
         {
@@ -456,10 +481,15 @@ namespace CodeAnalyzer
 
                     try
                     {
+                        // Merge MongoCollection node
+                        var parts = collectionId.Split('.');
+                        string database = parts.Length > 1 ? parts[1] : "UnknownDatabase";
+                        string collName = parts.Length > 2 ? parts[2] : parts.Last();
+
                         await CreateNode(session, collectionId, "MongoCollection", new Dictionary<string, object>
                         {
-                            { "name", collectionId.Split('.').Last() },
-                            { "database", collectionId.Split('.').Skip(1).FirstOrDefault() ?? "UnknownDatabase" },
+                            { "name", collName },
+                            { "database", database },
                             { "color", NodeColors["MongoCollection"] }
                         });
 
@@ -490,6 +520,14 @@ namespace CodeAnalyzer
         {
             string relativePath = filePath.Replace("/app/", "");
             return $"{BaseUrl}/{relativePath}#{lineNumber}";
+        }
+
+        static string ExtractProjectFromId(string classId)
+        {
+            // classId is in format: projectName:namespace.class
+            // Extract everything before the first colon as project name
+            var parts = classId.Split(':');
+            return parts.Length > 0 ? parts[0] : "UnknownProject";
         }
     }
 }
