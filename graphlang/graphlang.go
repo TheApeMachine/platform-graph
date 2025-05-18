@@ -89,7 +89,7 @@ type TreeSitterParser struct {
 }
 
 // NewTreeSitterParser initializes the TreeSitterParser and connects it to Neo4j.
-// NewTreeSitterParser initializes the TreeSitterParser with configuration
+// NewTreeSitterParser creates a new TreeSitterParser instance configured for a specific project, root node, and source code base URL.
 func NewTreeSitterParser(driver neo4j.DriverWithContext, rootName, baseURL, projectRoot string) *TreeSitterParser {
 	return &TreeSitterParser{
 		Handle:      sitter.NewParser(),

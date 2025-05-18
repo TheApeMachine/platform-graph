@@ -9,7 +9,7 @@ import (
 	"github.com/theapemachine/platform-graph/graphlang"
 )
 
-// Main function to demonstrate usage.
+// main initializes configuration from environment variables, connects to a Neo4j database, and analyzes a directory using a TreeSitter-based parser.
 func main() {
 	neo4jURI := os.Getenv("NEO4J_URI")
 	neo4jUser := os.Getenv("NEO4J_USER")
