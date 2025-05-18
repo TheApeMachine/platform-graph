@@ -371,13 +371,15 @@ func (parser *TreeSitterParser) AnalyzeDirectory(dirPath string) error {
 	}
 
 	// Create or update root node
-	session := parser.driver.NewSession(context.Background(), neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
-	_, err := session.Run(context.Background(),
-		"MERGE (r:Root {id:$id}) ON CREATE SET r.name=$name, r.project=$project, r.color=$color",
-		map[string]any{"id": parser.rootID, "name": parser.rootName, "project": parser.rootName, "color": NodeColors["Root"]})
-	session.Close(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to create root node: %v", err)
+// Create or update root node
+session := parser.driver.NewSession(context.Background(), neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+defer session.Close(context.Background()) // Ensure session is closed
+_, err := session.Run(context.Background(),
+	"MERGE (r:Root {id:$id}) ON CREATE SET r.name=$name, r.project=$project, r.color=$color",
+	map[string]any{"id": parser.rootID, "name": parser.rootName, "project": parser.rootName, "color": NodeColors["Root"]})
+if err != nil {
+	return fmt.Errorf("failed to create root node: %v", err)
+}
 	}
 
 	// Initialize analysis state
