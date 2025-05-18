@@ -50,6 +50,14 @@ import (
 	"github.com/smacker/go-tree-sitter/yaml"
 )
 
+// NodeColors defines basic colors for node types used when creating nodes
+var NodeColors = map[string]string{
+	"Root":      "orange",
+	"Namespace": "#f5a442",
+	"Type":      "#4287f5",
+	"Function":  "#42f54e",
+}
+
 // CallRelation struct to store pending function call relationships
 type CallRelation struct {
 	CallerName string
@@ -63,11 +71,17 @@ type TreeSitterParser struct {
 	language         *sitter.Language
 	code             string
 	ext              string
+	filePath         string
 	currentFunc      string
 	currentNamespace string
 	currentType      string
 	driver           neo4j.DriverWithContext
 	tree             *sitter.Tree
+
+	rootName    string
+	baseURL     string
+	projectRoot string
+	rootID      string
 
 	// Pending call relationships
 	pendingRelations []CallRelation
@@ -75,11 +89,26 @@ type TreeSitterParser struct {
 }
 
 // NewTreeSitterParser initializes the TreeSitterParser and connects it to Neo4j.
-func NewTreeSitterParser(driver neo4j.DriverWithContext) *TreeSitterParser {
+// NewTreeSitterParser initializes the TreeSitterParser with configuration
+func NewTreeSitterParser(driver neo4j.DriverWithContext, rootName, baseURL, projectRoot string) *TreeSitterParser {
 	return &TreeSitterParser{
-		Handle: sitter.NewParser(),
-		driver: driver,
+		Handle:      sitter.NewParser(),
+		driver:      driver,
+		rootName:    rootName,
+		baseURL:     baseURL,
+		projectRoot: projectRoot,
+		rootID:      fmt.Sprintf("root:%s", rootName),
 	}
+}
+
+// createURL builds a link to the source code line using BaseURL and project root
+func (parser *TreeSitterParser) createURL(line int) string {
+	rel := strings.TrimPrefix(parser.filePath, parser.projectRoot)
+	base := parser.baseURL
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	return fmt.Sprintf("%s%s#%d", base, strings.TrimPrefix(rel, "/"), line)
 }
 
 // ExtToLang sets the parser's language based on the file extension.
@@ -259,9 +288,12 @@ func (parser *TreeSitterParser) traverseNode(node *sitter.Node, tx neo4j.Managed
 
 // cleanup handles database cleanup
 func (parser *TreeSitterParser) cleanup() error {
-	neo4jURI := "bolt://host.docker.internal:7687"
-	neo4jUser := "neo4j"
-	neo4jPassword := "securepassword"
+	neo4jURI := os.Getenv("NEO4J_URI")
+	neo4jUser := os.Getenv("NEO4J_USER")
+	neo4jPassword := os.Getenv("NEO4J_PASSWORD")
+	if neo4jURI == "" || neo4jUser == "" || neo4jPassword == "" {
+		return fmt.Errorf("missing required environment variables: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD")
+	}
 
 	log.Printf("Connecting to Neo4j at %s with user %s and password %s\n", neo4jURI, neo4jUser, neo4jPassword)
 	driver, err := neo4j.NewDriverWithContext(neo4jURI, neo4j.BasicAuth(neo4jUser, neo4jPassword, ""))
@@ -282,8 +314,8 @@ func (parser *TreeSitterParser) cleanup() error {
 
 	_, err = tx1.Run(
 		context.Background(),
-		"MATCH (n) DETACH DELETE n",
-		map[string]any{},
+		"MATCH (n {project: $project}) DETACH DELETE n",
+		map[string]any{"project": parser.rootName},
 	)
 	if err != nil {
 		_ = tx1.Rollback(context.Background())
@@ -336,6 +368,18 @@ func (parser *TreeSitterParser) AnalyzeDirectory(dirPath string) error {
 		log.Printf("Continuing with analysis...")
 	} else {
 		log.Printf("Database cleanup completed successfully")
+	}
+
+	// Create or update root node
+// Create or update root node
+session := parser.driver.NewSession(context.Background(), neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+defer session.Close(context.Background()) // Ensure session is closed
+_, err := session.Run(context.Background(),
+	"MERGE (r:Root {id:$id}) ON CREATE SET r.name=$name, r.project=$project, r.color=$color",
+	map[string]any{"id": parser.rootID, "name": parser.rootName, "project": parser.rootName, "color": NodeColors["Root"]})
+if err != nil {
+	return fmt.Errorf("failed to create root node: %v", err)
+}
 	}
 
 	// Initialize analysis state
@@ -518,10 +562,15 @@ func (parser *TreeSitterParser) processFile(ctx context.Context, path string) er
 
 	// Create a new parser instance for this file
 	fileParser := &TreeSitterParser{
-		Handle: sitter.NewParser(),
-		driver: parser.driver,
-		code:   string(code),
-		ext:    filepath.Ext(path)[1:], // This gets the extension without the dot
+		Handle:      sitter.NewParser(),
+		driver:      parser.driver,
+		code:        string(code),
+		ext:         filepath.Ext(path)[1:], // This gets the extension without the dot
+		filePath:    path,
+		rootName:    parser.rootName,
+		baseURL:     parser.baseURL,
+		projectRoot: parser.projectRoot,
+		rootID:      parser.rootID,
 	}
 
 	// Parse and analyze the file
@@ -608,25 +657,32 @@ func (parser *TreeSitterParser) handleFunction(node *sitter.Node, tx neo4j.Manag
 	params := parser.extractParameters(node)
 	returnType := parser.extractReturnType(node)
 
+	line := int(position.Row) + 1
 	_, err := tx.Run(
 		context.Background(),
 		`MERGE (f:Function {id: $id})
-		 ON CREATE SET 
-			 f.name = $name,
-			 f.qualifiedName = $qualifiedName,
-			 f.file = $file,
-			 f.position = $position,
-			 f.parameters = $params,
-			 f.returnType = $returnType
-		 WITH f
-		 OPTIONAL MATCH (t:Type {qualifiedName: $typeName})
-		 WHERE $typeName IS NOT NULL
-		 MERGE (t)-[:HAS_MEMBER]->(f)`,
+                 ON CREATE SET
+                         f.name = $name,
+                         f.qualifiedName = $qualifiedName,
+                         f.file = $file,
+                         f.project = $project,
+                         f.color = $color,
+                         f.url = $url,
+                         f.position = $position,
+                         f.parameters = $params,
+                         f.returnType = $returnType
+                 WITH f
+                 OPTIONAL MATCH (t:Type {qualifiedName: $typeName})
+                 WHERE $typeName IS NOT NULL
+                 MERGE (t)-[:HAS_MEMBER]->(f)`,
 		map[string]any{
-			"id":            fmt.Sprintf("%s:%s", parser.ext, qualifiedName),
+			"id":            fmt.Sprintf("%s:%s", parser.rootName, qualifiedName),
 			"name":          funcName,
 			"qualifiedName": qualifiedName,
-			"file":          parser.ext,
+			"file":          parser.filePath,
+			"project":       parser.rootName,
+			"color":         NodeColors["Function"],
+			"url":           parser.createURL(line),
 			"position":      fmt.Sprintf("%d:%d", position.Row, position.Column),
 			"params":        params,
 			"returnType":    returnType,
@@ -636,6 +692,9 @@ func (parser *TreeSitterParser) handleFunction(node *sitter.Node, tx neo4j.Manag
 
 	if err == nil {
 		parser.currentFunc = qualifiedName
+		_, _ = tx.Run(context.Background(),
+			`MATCH (r:Root {id:$rid}), (f:Function {id:$fid}) MERGE (r)-[:CONTAINS]->(f)`,
+			map[string]any{"rid": parser.rootID, "fid": fmt.Sprintf("%s:%s", parser.rootName, qualifiedName)})
 		log.Printf("Info: Set currentFunc to '%s'", qualifiedName)
 	} else {
 		log.Printf("Error handling function '%s': %v", qualifiedName, err)
@@ -867,18 +926,30 @@ func (parser *TreeSitterParser) handleNamespace(node *sitter.Node, tx neo4j.Mana
 	namespaceName := nameNode.Content([]byte(parser.code))
 	parser.currentNamespace = namespaceName
 
+	line := int(node.StartPoint().Row) + 1
 	_, err := tx.Run(
 		context.Background(),
 		`MERGE (n:Namespace {id: $id})
-		ON CREATE SET 
-			n.name = $name,
-			n.file = $file`,
+                ON CREATE SET
+                        n.name = $name,
+                        n.file = $file,
+                        n.project = $project,
+                        n.color = $color,
+                        n.url = $url`,
 		map[string]any{
-			"id":   fmt.Sprintf("%s:%s", parser.ext, namespaceName),
-			"name": namespaceName,
-			"file": parser.ext,
+			"id":      fmt.Sprintf("%s:%s", parser.rootName, namespaceName),
+			"name":    namespaceName,
+			"file":    parser.filePath,
+			"project": parser.rootName,
+			"color":   NodeColors["Namespace"],
+			"url":     parser.createURL(line),
 		},
 	)
+	if err == nil {
+		_, _ = tx.Run(context.Background(),
+			`MATCH (r:Root {id:$rid}), (n:Namespace {id:$nid}) MERGE (r)-[:CONTAINS]->(n)`,
+			map[string]any{"rid": parser.rootID, "nid": fmt.Sprintf("%s:%s", parser.rootName, namespaceName)})
+	}
 	return err
 }
 
@@ -895,25 +966,37 @@ func (parser *TreeSitterParser) handleType(node *sitter.Node, tx neo4j.ManagedTr
 	}
 	parser.currentType = qualifiedName
 
+	line := int(node.StartPoint().Row) + 1
 	_, err := tx.Run(
 		context.Background(),
 		`MERGE (t:Type {id: $id})
-		ON CREATE SET 
-			t.name = $name,
-			t.qualifiedName = $qualifiedName,
-			t.file = $file
-		WITH t
-		OPTIONAL MATCH (n:Namespace {name: $namespace})
-		WHERE $namespace IS NOT NULL
-		MERGE (n)-[:CONTAINS]->(t)`,
+                ON CREATE SET
+                        t.name = $name,
+                        t.qualifiedName = $qualifiedName,
+                        t.file = $file,
+                        t.project = $project,
+                        t.color = $color,
+                        t.url = $url
+                WITH t
+                OPTIONAL MATCH (n:Namespace {name: $namespace})
+                WHERE $namespace IS NOT NULL
+                MERGE (n)-[:CONTAINS]->(t)`,
 		map[string]any{
-			"id":            fmt.Sprintf("%s:%s", parser.ext, qualifiedName),
+			"id":            fmt.Sprintf("%s:%s", parser.rootName, qualifiedName),
 			"name":          typeName,
 			"qualifiedName": qualifiedName,
-			"file":          parser.ext,
+			"file":          parser.filePath,
+			"project":       parser.rootName,
+			"color":         NodeColors["Type"],
+			"url":           parser.createURL(line),
 			"namespace":     parser.currentNamespace,
 		},
 	)
+	if err == nil {
+		_, _ = tx.Run(context.Background(),
+			`MATCH (r:Root {id:$rid}), (t:Type {id:$tid}) MERGE (r)-[:CONTAINS]->(t)`,
+			map[string]any{"rid": parser.rootID, "tid": fmt.Sprintf("%s:%s", parser.rootName, qualifiedName)})
+	}
 	return err
 }
 
