@@ -42,7 +42,14 @@ namespace CodeAnalyzer
             string solutionPath = @"/app/" + rootName + ".sln";
 
             // Initialize Neo4j driver with retry logic
-            var driver = await CreateNeo4jDriverWithRetry("bolt://host.docker.internal:7687", AuthTokens.Basic("neo4j", "securepassword"));
+            string neo4jUri = Environment.GetEnvironmentVariable("NEO4J_URI")
+                ?? throw new InvalidOperationException("NEO4J_URI environment variable must be set");
+            string neo4jUser = Environment.GetEnvironmentVariable("NEO4J_USER")
+                ?? throw new InvalidOperationException("NEO4J_USER environment variable must be set");
+            string neo4jPassword = Environment.GetEnvironmentVariable("NEO4J_PASSWORD")
+                ?? throw new InvalidOperationException("NEO4J_PASSWORD environment variable must be set");
+
+            var driver = await CreateNeo4jDriverWithRetry(neo4jUri, AuthTokens.Basic(neo4jUser, neo4jPassword));
             using var session = driver.AsyncSession();
 
             // Clean up previous run data

@@ -3,7 +3,6 @@ package graphlang
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -60,9 +59,28 @@ var NodeColors = map[string]string{
 
 // CallRelation struct to store pending function call relationships
 type CallRelation struct {
-	CallerName string
-	CalleeName string
+	CallerID  string
+	CalleeID  string
 	Arguments  []string
+}
+
+type relationStore struct {
+	mu        sync.Mutex
+	relations []CallRelation
+}
+
+func (s *relationStore) add(rel CallRelation) {
+	s.mu.Lock()
+	s.relations = append(s.relations, rel)
+	s.mu.Unlock()
+}
+
+func (s *relationStore) drain() []CallRelation {
+	s.mu.Lock()
+	pending := s.relations
+	s.relations = nil
+	s.mu.Unlock()
+	return pending
 }
 
 // TreeSitterParser struct
@@ -84,8 +102,7 @@ type TreeSitterParser struct {
 	rootID      string
 
 	// Pending call relationships
-	pendingRelations []CallRelation
-	pendingMutex     sync.Mutex
+	relationStore *relationStore
 }
 
 // NewTreeSitterParser initializes the TreeSitterParser and connects it to Neo4j.
@@ -98,6 +115,7 @@ func NewTreeSitterParser(driver neo4j.DriverWithContext, rootName, baseURL, proj
 		baseURL:     baseURL,
 		projectRoot: projectRoot,
 		rootID:      fmt.Sprintf("root:%s", rootName),
+		relationStore: &relationStore{},
 	}
 }
 
@@ -288,25 +306,11 @@ func (parser *TreeSitterParser) traverseNode(node *sitter.Node, tx neo4j.Managed
 
 // cleanup handles database cleanup
 func (parser *TreeSitterParser) cleanup() error {
-	neo4jURI := os.Getenv("NEO4J_URI")
-	neo4jUser := os.Getenv("NEO4J_USER")
-	neo4jPassword := os.Getenv("NEO4J_PASSWORD")
-	if neo4jURI == "" || neo4jUser == "" || neo4jPassword == "" {
-		return fmt.Errorf("missing required environment variables: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD")
-	}
-
-	log.Printf("Connecting to Neo4j at %s with user %s and password %s\n", neo4jURI, neo4jUser, neo4jPassword)
-	driver, err := neo4j.NewDriverWithContext(neo4jURI, neo4j.BasicAuth(neo4jUser, neo4jPassword, ""))
-	if err != nil {
-		log.Fatalf("Failed to create Neo4j driver: %v", err)
-	}
-	defer driver.Close(context.Background())
-
-	session := driver.NewSession(context.Background(), neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	session := parser.driver.NewSession(context.Background(), neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(context.Background())
 
 	// First transaction: Delete all nodes and relationships
-	log.Printf("Starting data cleanup...")
+	log.Printf("Starting data cleanup for project %q...", parser.rootName)
 	tx1, err := session.BeginTransaction(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to create data cleanup transaction: %v", err)
@@ -335,9 +339,10 @@ func (parser *TreeSitterParser) cleanup() error {
 	}
 
 	schemaQueries := []string{
-		"CREATE INDEX IF NOT EXISTS FOR (n:Namespace) ON (n.id)",
-		"CREATE INDEX IF NOT EXISTS FOR (t:Type) ON (t.id)",
-		"CREATE INDEX IF NOT EXISTS FOR (f:Function) ON (f.id)",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (r:Root) REQUIRE r.id IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:Namespace) REQUIRE n.id IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (t:Type) REQUIRE t.id IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (f:Function) REQUIRE f.id IS UNIQUE",
 	}
 
 	for _, query := range schemaQueries {
@@ -359,6 +364,15 @@ func (parser *TreeSitterParser) cleanup() error {
 	return nil
 }
 
+func shouldSkipDir(name string) bool {
+	switch name {
+	case "node_modules", ".git", "vendor", "build", "dist":
+		return true
+	default:
+		return false
+	}
+}
+
 // AnalyzeDirectory walks through a directory and analyzes all supported files.
 func (parser *TreeSitterParser) AnalyzeDirectory(dirPath string) error {
 	// Attempt cleanup but continue even if it fails
@@ -371,15 +385,13 @@ func (parser *TreeSitterParser) AnalyzeDirectory(dirPath string) error {
 	}
 
 	// Create or update root node
-// Create or update root node
-session := parser.driver.NewSession(context.Background(), neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
-defer session.Close(context.Background()) // Ensure session is closed
-_, err := session.Run(context.Background(),
-	"MERGE (r:Root {id:$id}) ON CREATE SET r.name=$name, r.project=$project, r.color=$color",
-	map[string]any{"id": parser.rootID, "name": parser.rootName, "project": parser.rootName, "color": NodeColors["Root"]})
-if err != nil {
-	return fmt.Errorf("failed to create root node: %v", err)
-}
+	session := parser.driver.NewSession(context.Background(), neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(context.Background()) // Ensure session is closed
+	_, err := session.Run(context.Background(),
+		"MERGE (r:Root {id:$id}) ON CREATE SET r.name=$name, r.project=$project, r.color=$color",
+		map[string]any{"id": parser.rootID, "name": parser.rootName, "project": parser.rootName, "color": NodeColors["Root"]})
+	if err != nil {
+		return fmt.Errorf("failed to create root node: %v", err)
 	}
 
 	// Initialize analysis state
@@ -419,6 +431,12 @@ if err != nil {
 	if err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+		if info.IsDir() {
+			if shouldSkipDir(info.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !info.IsDir() && parser.isSupportedFile(path) {
 			totalFiles.Add(1)
@@ -465,8 +483,7 @@ if err != nil {
 			}
 
 			if info.IsDir() {
-				switch info.Name() {
-				case "node_modules", ".git", "vendor", "build", "dist":
+				if shouldSkipDir(info.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -505,10 +522,10 @@ if err != nil {
 
 // processPendingRelations processes all pending CALLS relationships.
 func (parser *TreeSitterParser) processPendingRelations() (neo4j.ResultWithContext, error) {
-	parser.pendingMutex.Lock()
-	pending := parser.pendingRelations
-	parser.pendingRelations = nil
-	parser.pendingMutex.Unlock()
+	if parser.relationStore == nil {
+		return nil, nil
+	}
+	pending := parser.relationStore.drain()
 
 	if len(pending) == 0 {
 		log.Printf("No pending CALLS relationships to process.")
@@ -522,30 +539,43 @@ func (parser *TreeSitterParser) processPendingRelations() (neo4j.ResultWithConte
 	defer session.Close(context.Background())
 
 	for _, rel := range pending {
-		_, err := session.ExecuteWrite(context.Background(),
+		result, err := session.ExecuteWrite(context.Background(),
 			func(tx neo4j.ManagedTransaction) (interface{}, error) {
-				return tx.Run(
+				res, err := tx.Run(
 					context.Background(),
-					`MATCH (caller:Function {qualifiedName: $callerName}), 
-						   (callee:Function {qualifiedName: $calleeName})
+					`MATCH (caller:Function {id: $callerId}), 
+						   (callee:Function {id: $calleeId})
 					 MERGE (caller)-[c:CALLS]->(callee)
 					 ON CREATE SET 
 						 c.arguments = $args,
-						 c.timestamp = timestamp()`,
+						 c.timestamp = timestamp()
+					 RETURN id(c) AS relId`,
 					map[string]any{
-						"callerName": rel.CallerName,
-						"calleeName": rel.CalleeName,
+						"callerId": rel.CallerID,
+						"calleeId": rel.CalleeID,
 						"args":       rel.Arguments,
 					},
 				)
+				if err != nil {
+					return false, err
+				}
+				ok := res.Next(context.Background())
+				if err := res.Err(); err != nil {
+					return false, err
+				}
+				return ok, nil
 			})
 		if err != nil {
 			log.Printf("Failed to create pending CALLS relationship from '%s' to '%s': %v",
-				rel.CallerName, rel.CalleeName, err)
-			// Optionally, you can re-add to pendingRelations or handle retries here
+				rel.CallerID, rel.CalleeID, err)
+			continue
+		}
+		if created, _ := result.(bool); !created {
+			log.Printf("Skipped pending CALLS relationship (missing caller/callee) from '%s' to '%s'",
+				rel.CallerID, rel.CalleeID)
 		} else {
 			log.Printf("Successfully created pending CALLS relationship from '%s' to '%s'",
-				rel.CallerName, rel.CalleeName)
+				rel.CallerID, rel.CalleeID)
 		}
 	}
 
@@ -565,12 +595,13 @@ func (parser *TreeSitterParser) processFile(ctx context.Context, path string) er
 		Handle:      sitter.NewParser(),
 		driver:      parser.driver,
 		code:        string(code),
-		ext:         filepath.Ext(path)[1:], // This gets the extension without the dot
+		ext:         parser.detectExt(path),
 		filePath:    path,
 		rootName:    parser.rootName,
 		baseURL:     parser.baseURL,
 		projectRoot: parser.projectRoot,
 		rootID:      parser.rootID,
+		relationStore: parser.relationStore,
 	}
 
 	// Parse and analyze the file
@@ -586,28 +617,35 @@ func (parser *TreeSitterParser) processFile(ctx context.Context, path string) er
 
 // readFile reads a file with context awareness
 func (parser *TreeSitterParser) readFile(ctx context.Context, path string) ([]byte, error) {
-	// Create a channel for the read result
-	resultChan := make(chan struct {
-		data []byte
-		err  error
-	})
-
-	// Read file in a goroutine
-	go func() {
-		data, err := ioutil.ReadFile(path)
-		resultChan <- struct {
-			data []byte
-			err  error
-		}{data, err}
-	}()
-
-	// Wait for either the read to complete or context to be cancelled
 	select {
-	case result := <-resultChan:
-		return result.data, result.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	default:
 	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		return data, nil
+	}
+}
+
+func (parser *TreeSitterParser) detectExt(path string) string {
+	ext := strings.TrimPrefix(filepath.Ext(path), ".")
+	if ext != "" {
+		return ext
+	}
+
+	base := filepath.Base(path)
+	if base == "Dockerfile" || strings.HasPrefix(base, "Dockerfile.") || base == "Containerfile" || strings.HasPrefix(base, "Containerfile.") {
+		return "dockerfile"
+	}
+
+	return ""
 }
 
 // isSupportedFile checks if the file extension matches supported languages.
@@ -618,10 +656,7 @@ func (parser *TreeSitterParser) isSupportedFile(filename string) bool {
 		"elm", "hcl", "html", "kt", "lua", "ml", "mli", "scala",
 		"sql", "swift", "toml", "yaml", "yml", "cue", "groovy", "md", "markdown", "proto", "protobuf", "svelte",
 	}
-	ext := filepath.Ext(filename)
-	if len(ext) > 0 {
-		ext = ext[1:] // remove dot
-	}
+	ext := parser.detectExt(filename)
 	for _, supportedExt := range supportedExtensions {
 		if ext == supportedExt {
 			return true
@@ -657,6 +692,11 @@ func (parser *TreeSitterParser) handleFunction(node *sitter.Node, tx neo4j.Manag
 	params := parser.extractParameters(node)
 	returnType := parser.extractReturnType(node)
 
+	var typeID any
+	if parser.currentType != "" {
+		typeID = fmt.Sprintf("%s:%s", parser.rootName, parser.currentType)
+	}
+
 	line := int(position.Row) + 1
 	_, err := tx.Run(
 		context.Background(),
@@ -672,8 +712,8 @@ func (parser *TreeSitterParser) handleFunction(node *sitter.Node, tx neo4j.Manag
                          f.parameters = $params,
                          f.returnType = $returnType
                  WITH f
-                 OPTIONAL MATCH (t:Type {qualifiedName: $typeName})
-                 WHERE $typeName IS NOT NULL
+                 OPTIONAL MATCH (t:Type {id: $typeId})
+                 WHERE $typeId IS NOT NULL
                  MERGE (t)-[:HAS_MEMBER]->(f)`,
 		map[string]any{
 			"id":            fmt.Sprintf("%s:%s", parser.rootName, qualifiedName),
@@ -686,7 +726,7 @@ func (parser *TreeSitterParser) handleFunction(node *sitter.Node, tx neo4j.Manag
 			"position":      fmt.Sprintf("%d:%d", position.Row, position.Column),
 			"params":        params,
 			"returnType":    returnType,
-			"typeName":      parser.currentType,
+			"typeId":        typeID,
 		},
 	)
 
@@ -738,6 +778,8 @@ func (parser *TreeSitterParser) handleCallExpression(node *sitter.Node, tx neo4j
 
 	// Resolve the fully qualified callee name
 	qualifiedCallee := parser.resolveQualifiedName(calleeName)
+	calleeID := fmt.Sprintf("%s:%s", parser.rootName, qualifiedCallee)
+	callerID := fmt.Sprintf("%s:%s", parser.rootName, parser.currentFunc)
 
 	if qualifiedCallee == "" {
 		log.Printf("Warning: qualifiedCallee is empty for calleeName: %s at position %d:%d",
@@ -748,7 +790,7 @@ func (parser *TreeSitterParser) handleCallExpression(node *sitter.Node, tx neo4j
 	}
 
 	// Check if the callee function exists
-	exists, err := parser.checkFunctionExists(tx, qualifiedCallee)
+	exists, err := parser.checkFunctionExists(tx, calleeID)
 	if err != nil {
 		log.Printf("Error checking existence of callee '%s': %v", qualifiedCallee, err)
 		return err
@@ -757,33 +799,33 @@ func (parser *TreeSitterParser) handleCallExpression(node *sitter.Node, tx neo4j
 	if !exists {
 		// Add to pending relations
 		parser.addPendingRelation(CallRelation{
-			CallerName: parser.currentFunc,
-			CalleeName: qualifiedCallee,
+			CallerID:  callerID,
+			CalleeID:  calleeID,
 			Arguments:  args,
 		})
 		log.Printf("Info: Added pending CALLS relationship from '%s' to '%s'",
-			parser.currentFunc, qualifiedCallee)
+			callerID, calleeID)
 		return nil
 	}
 
 	// Create the CALLS relationship
 	_, err = tx.Run(
 		context.Background(),
-		`MATCH (caller:Function {qualifiedName: $callerName}), 
-			   (callee:Function {qualifiedName: $calleeName})
+		`MATCH (caller:Function {id: $callerId}), 
+			   (callee:Function {id: $calleeId})
 		 MERGE (caller)-[c:CALLS]->(callee)
 		 ON CREATE SET 
 			 c.arguments = $args,
 			 c.timestamp = timestamp()`,
 		map[string]any{
-			"callerName": parser.currentFunc,
-			"calleeName": qualifiedCallee,
+			"callerId": callerID,
+			"calleeId": calleeID,
 			"args":       args,
 		},
 	)
 	if err != nil {
 		log.Printf("Error creating CALLS relationship from '%s' to '%s' at position %d:%d: %v",
-			parser.currentFunc, qualifiedCallee,
+			callerID, calleeID,
 			node.StartPoint().Row,
 			node.StartPoint().Column,
 			err)
@@ -792,26 +834,31 @@ func (parser *TreeSitterParser) handleCallExpression(node *sitter.Node, tx neo4j
 }
 
 // checkFunctionExists checks if a function with the given qualified name exists in the graph.
-func (parser *TreeSitterParser) checkFunctionExists(tx neo4j.ManagedTransaction, qualifiedCallee string) (bool, error) {
+func (parser *TreeSitterParser) checkFunctionExists(tx neo4j.ManagedTransaction, calleeID string) (bool, error) {
 	result, err := tx.Run(
 		context.Background(),
-		`MATCH (callee:Function {qualifiedName: $qualifiedName})
+		`MATCH (callee:Function {id: $id})
 		 RETURN callee LIMIT 1`,
 		map[string]any{
-			"qualifiedName": qualifiedCallee,
+			"id": calleeID,
 		},
 	)
 	if err != nil {
 		return false, err
 	}
-	return result.Next(context.Background()), nil
+	exists := result.Next(context.Background())
+	if err := result.Err(); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
-// addPendingRelation adds a CallRelation to the pendingRelations slice in a thread-safe manner.
+// addPendingRelation adds a CallRelation to the shared pending-relation store.
 func (parser *TreeSitterParser) addPendingRelation(rel CallRelation) {
-	parser.pendingMutex.Lock()
-	defer parser.pendingMutex.Unlock()
-	parser.pendingRelations = append(parser.pendingRelations, rel)
+	if parser.relationStore == nil {
+		parser.relationStore = &relationStore{}
+	}
+	parser.relationStore.add(rel)
 }
 
 // extractParameters extracts and returns function parameter information
@@ -966,6 +1013,11 @@ func (parser *TreeSitterParser) handleType(node *sitter.Node, tx neo4j.ManagedTr
 	}
 	parser.currentType = qualifiedName
 
+	var namespaceID any
+	if parser.currentNamespace != "" {
+		namespaceID = fmt.Sprintf("%s:%s", parser.rootName, parser.currentNamespace)
+	}
+
 	line := int(node.StartPoint().Row) + 1
 	_, err := tx.Run(
 		context.Background(),
@@ -978,8 +1030,8 @@ func (parser *TreeSitterParser) handleType(node *sitter.Node, tx neo4j.ManagedTr
                         t.color = $color,
                         t.url = $url
                 WITH t
-                OPTIONAL MATCH (n:Namespace {name: $namespace})
-                WHERE $namespace IS NOT NULL
+                OPTIONAL MATCH (n:Namespace {id: $namespaceId})
+                WHERE $namespaceId IS NOT NULL
                 MERGE (n)-[:CONTAINS]->(t)`,
 		map[string]any{
 			"id":            fmt.Sprintf("%s:%s", parser.rootName, qualifiedName),
@@ -989,7 +1041,7 @@ func (parser *TreeSitterParser) handleType(node *sitter.Node, tx neo4j.ManagedTr
 			"project":       parser.rootName,
 			"color":         NodeColors["Type"],
 			"url":           parser.createURL(line),
-			"namespace":     parser.currentNamespace,
+			"namespaceId":   namespaceID,
 		},
 	)
 	if err == nil {

@@ -1,0 +1,10 @@
+{
+  "workspaceRoot": "/workspace",
+  "projects": [
+    {
+      "name": "lookingglass",
+      "path": "../lookingglass",
+      "baseURL": "http://localhost"
+    }
+  ]
+}

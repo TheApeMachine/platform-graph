@@ -45,7 +45,9 @@ def main():
         raise RuntimeError("MONGO_URI environment variable must be set for MongoDB connection.")
 
     mongo_client = MongoClient(mongo_uri)
-    db_name = "FanApp"  # Replace with your database name if needed or make configurable
+    db_name = os.getenv("MONGO_DATABASE")
+    if not db_name:
+        raise RuntimeError("MONGO_DATABASE environment variable must be set for MongoDB connection.")
     db = mongo_client[db_name]
 
     neo4j_driver = create_neo4j_driver()
@@ -64,32 +66,33 @@ def main():
             {"id": root_id, "name": root_name, "project": root_name, "color": NODE_COLORS["Root"]}
         )
 
-        # Create or update Database node and link it to Root
-        database_id = f"mongo:{db.name}"
+        database_id = f"{root_name}:mongo:{db.name}"
+
+        # Clean up previous run data for this project (Database/Collections only)
+        logging.info("Cleaning up MongoDB schema data from previous run")
+        session.run(
+            "MATCH (n) WHERE n.project = $project AND (n:Database OR n:Collection) DETACH DELETE n",
+            {"project": root_name},
+        )
+        logging.info("Cleanup completed")
+
+        # Create Database node and link to Root after cleanup
         session.run(
             "MERGE (d:Database {id:$id}) "
             "ON CREATE SET d.name=$name, d.project=$project, d.color=$color "
             "ON MATCH SET d.name=$name, d.project=$project, d.color=$color",
-            {"id": database_id, "name": db.name, "project": root_name, "color": NODE_COLORS["Database"]}
+            {"id": database_id, "name": db.name, "project": root_name, "color": NODE_COLORS["Database"]},
         )
-        # Link Root to Database
         session.run(
             "MATCH (r:Root {id:$rootId}), (d:Database {id:$databaseId}) MERGE (r)-[:CONTAINS]->(d)",
-            {"rootId": root_id, "databaseId": database_id}
+            {"rootId": root_id, "databaseId": database_id},
         )
-
-        # Clean up previous run data (only Collections, since we want to preserve Root and Database)
-        logging.info("Cleaning up collection data from previous run")
-        session.run(
-            "MATCH (c:Collection) DETACH DELETE c"
-        )
-        logging.info("Cleanup completed")
 
         # Extract schema and push to Neo4j
-        extract_schema_and_push_to_neo4j(session, db, database_id)
+        extract_schema_and_push_to_neo4j(session, db, database_id, root_name)
 
         # Detect and create relationships between collections
-        detect_and_create_relationships(session, db)
+        detect_and_create_relationships(session, db, root_name)
 
     logging.info("MongoDB analysis complete")
 
@@ -98,12 +101,13 @@ def create_uniqueness_constraints(session):
     session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Database) REQUIRE d.id IS UNIQUE")
     session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Collection) REQUIRE c.id IS UNIQUE")
 
-def extract_schema_and_push_to_neo4j(session, db, database_id, sample_size=100):
+def extract_schema_and_push_to_neo4j(session, db, database_id, root_name, sample_size=100):
     """
     Extracts the schema of collections and pushes them to Neo4j.
     :param session: Neo4j session object.
     :param db: MongoDB database object.
     :param database_id: The id of the Database node in Neo4j.
+    :param root_name: Project name/root label used for scoping.
     :param sample_size: Number of documents to sample for schema extraction.
     """
     for collection_name in db.list_collection_names():
@@ -111,17 +115,18 @@ def extract_schema_and_push_to_neo4j(session, db, database_id, sample_size=100):
 
         try:
             schema = get_collection_schema(collection, sample_size)
-            collection_id = f"mongo:{db.name}.{collection_name}"
+            collection_id = f"{root_name}:mongo:{db.name}.{collection_name}"
 
             # Create or merge Collection node
             session.run(
                 "MERGE (c:Collection {id: $id}) "
-                "ON CREATE SET c.name = $name, c.database = $database, c.color = $color, c.schema = $schema "
-                "ON MATCH SET c.name = $name, c.database = $database, c.color = $color, c.schema = $schema",
+                "ON CREATE SET c.name = $name, c.database = $database, c.project = $project, c.color = $color, c.schema = $schema "
+                "ON MATCH SET c.name = $name, c.database = $database, c.project = $project, c.color = $color, c.schema = $schema",
                 {
                     "id": collection_id,
                     "name": collection_name,
                     "database": db.name,
+                    "project": root_name,
                     "color": NODE_COLORS["Collection"],
                     "schema": str(schema)
                 }
@@ -159,11 +164,12 @@ def get_collection_schema(collection, sample_size=100):
         logging.error(f"Error extracting schema for collection {collection.name}: {e}")
         return schema
 
-def detect_and_create_relationships(session, db, sample_size=100):
+def detect_and_create_relationships(session, db, root_name, sample_size=100):
     """
     Detects relationships between collections based on field naming conventions and ObjectId references.
     :param session: Neo4j session object.
     :param db: MongoDB database object.
+    :param root_name: Project name/root label used for scoping.
     :param sample_size: Number of documents to sample for relationship detection.
     """
     collection_names = db.list_collection_names()
@@ -175,7 +181,7 @@ def detect_and_create_relationships(session, db, sample_size=100):
 
     for collection_name in collection_names:
         collection = db[collection_name]
-        collection_id = f"mongo:{db.name}.{collection_name}"
+        collection_id = f"{root_name}:mongo:{db.name}.{collection_name}"
         foreign_keys = {}
 
         try:
@@ -194,7 +200,7 @@ def detect_and_create_relationships(session, db, sample_size=100):
 
             # Create relationships in Neo4j
             for field, referenced_collection in foreign_keys.items():
-                referenced_collection_id = f"mongo:{db.name}.{referenced_collection}"
+                referenced_collection_id = f"{root_name}:mongo:{db.name}.{referenced_collection}"
                 session.run(
                     "MATCH (c1:Collection {id: $collectionId}), (c2:Collection {id: $referencedCollectionId}) "
                     "MERGE (c1)-[:REFERENCES {field: $field}]->(c2)",
